@@ -8,6 +8,7 @@ import time
 import copy
 from datetime import datetime
 from tqdm import tqdm
+from orem import orem
 
 # 导入自定义模块
 from datasets import ImbalancedDataset
@@ -179,6 +180,34 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
     print(f"最佳模型已保存到 {model_path}")
     
     return model
+
+def balance_dataset_with_orem(X, y, q=5):
+    # Separate minority and majority class samples
+    minority_class = 1  # Assuming positive class is the minority
+    majority_class = 0
+    
+    X_min = X[y == minority_class]
+    X_maj = X[y == majority_class]
+    
+    # If minority class is already the majority, switch labels
+    if len(X_min) > len(X_maj):
+        X_min, X_maj = X_maj, X_min
+        minority_class, majority_class = majority_class, minority_class
+    
+    # Generate synthetic samples
+    synthetic_samples = orem(X_min, X_maj, q=q)
+    
+    # Create synthetic labels (all minority class)
+    synthetic_labels = np.ones(len(synthetic_samples)) * minority_class
+    
+    # Combine original and synthetic data
+    X_balanced = np.vstack([X, synthetic_samples])
+    y_balanced = np.hstack([y, synthetic_labels])
+    
+    print(f"Original dataset shape: {X.shape}, {np.sum(y == minority_class)} minority samples, {np.sum(y == majority_class)} majority samples")
+    print(f"Balanced dataset shape: {X_balanced.shape}, {np.sum(y_balanced == minority_class)} minority samples, {np.sum(y_balanced == majority_class)} majority samples")
+    
+    return X_balanced, y_balanced
 
 def main():
     """主函数"""
