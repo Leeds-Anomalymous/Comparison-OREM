@@ -24,6 +24,41 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def balance_dataset_with_orem(X, y, q=5):
+    """
+    使用OREM算法生成合成样本，平衡数据集
+    """
+    # Separate minority and majority class samples
+    minority_class = 1  # Assuming positive class is the minority
+    majority_class = 0
+    
+    X_min = X[y == minority_class]
+    X_maj = X[y == majority_class]
+    
+    # If minority class is already the majority, switch labels
+    if len(X_min) > len(X_maj):
+        X_min, X_maj = X_maj, X_min
+        minority_class, majority_class = majority_class, minority_class
+    
+    # Generate synthetic samples
+    synthetic_samples = orem(X_min, X_maj, q=q)
+    
+    # Create synthetic labels (all minority class)
+    synthetic_labels = np.ones(len(synthetic_samples)) * minority_class
+    
+    # Combine original and synthetic data
+    X_balanced = np.vstack([X, synthetic_samples])
+    y_balanced = np.hstack([y, synthetic_labels])
+    
+    # 记录生成的合成样本数量
+    num_synthetic_samples = len(synthetic_samples)
+    
+    print(f"Original dataset shape: {X.shape}, {np.sum(y == minority_class)} minority samples, {np.sum(y == majority_class)} majority samples")
+    print(f"Balanced dataset shape: {X_balanced.shape}, {np.sum(y_balanced == minority_class)} minority samples, {np.sum(y_balanced == majority_class)} majority samples")
+    print(f"Generated {num_synthetic_samples} synthetic samples using OREM")
+    
+    return X_balanced, y_balanced, num_synthetic_samples
+
 def train_model(model, train_loader, val_loader, test_loader, config, dataset_obj=None):
     """
     训练模型函数
@@ -41,6 +76,65 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
     """
     device = config['device']
     model.to(device)
+    
+    # 获取原始训练数据并转换为NumPy数组，用于OREM处理
+    train_data = []
+    train_labels = []
+    
+    # 从DataLoader中提取数据和标签
+    for data, labels in train_loader:
+        if isinstance(data, torch.Tensor):
+            # 如果是图像数据，需要展平为2D数组
+            if len(data.shape) == 4:  # (batch, channels, height, width)
+                batch_size = data.shape[0]
+                data = data.reshape(batch_size, -1)  # 展平为(batch, features)
+            elif len(data.shape) == 3 and 'TBM' in config['dataset_name']:  # (batch, channels, seq_len)
+                batch_size = data.shape[0]
+                data = data.reshape(batch_size, -1)  # 展平为(batch, features)
+            
+            train_data.append(data.cpu().numpy())
+            train_labels.append(labels.cpu().numpy())
+    
+    # 合并批次数据
+    X = np.vstack(train_data)
+    y = np.concatenate(train_labels)
+    
+    # 使用OREM平衡数据集
+    print("\n使用OREM平衡训练数据集...")
+    X_balanced, y_balanced, num_synthetic_samples = balance_dataset_with_orem(X, y, q=5)
+    
+    # 将合成样本数量保存到配置中
+    config['num_synthetic_samples'] = num_synthetic_samples
+    
+    # 将平衡后的数据转换回PyTorch张量，并创建新的DataLoader
+    X_balanced_tensor = torch.FloatTensor(X_balanced)
+    y_balanced_tensor = torch.LongTensor(y_balanced)
+    
+    # 根据原始数据类型重新整形数据
+    if config['model_type'] == 'ResNet32_1d' and 'TBM' in config['dataset_name']:
+        # 对于TBM数据和ResNet32_1d模型，形状应为[batch, channels, length]
+        channels = 3
+        seq_length = X.shape[1] // channels
+        X_balanced_tensor = X_balanced_tensor.reshape(-1, channels, seq_length)
+    elif 'TBM' in config['dataset_name']:
+        # 对于TBM数据和其他模型
+        channels = 3
+        seq_length = X.shape[1] // channels
+        X_balanced_tensor = X_balanced_tensor.reshape(-1, channels, seq_length)
+    elif config['dataset_name'] == 'cifar10':
+        # 对于CIFAR-10数据集
+        X_balanced_tensor = X_balanced_tensor.reshape(-1, 3, 32, 32)
+    elif config['dataset_name'] in ['mnist', 'fashion_mnist']:
+        # 对于MNIST或Fashion-MNIST
+        X_balanced_tensor = X_balanced_tensor.reshape(-1, 1, 28, 28)
+    
+    # 创建平衡后的数据集和DataLoader
+    balanced_dataset = torch.utils.data.TensorDataset(X_balanced_tensor, y_balanced_tensor)
+    balanced_train_loader = torch.utils.data.DataLoader(
+        balanced_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=True
+    )
     
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
@@ -61,6 +155,7 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
     early_stopped = False
     
     print(f"开始训练 {config['model_type']} 模型 - 数据集: {config['dataset_name']}, 不平衡率: {config['rho']}")
+    print(f"使用OREM平衡后的训练集大小: {len(balanced_dataset)}")
     
     # 训练循环
     for epoch in range(1, config['epochs'] + 1):
@@ -70,10 +165,10 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
         correct = 0
         total = 0
         
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}/{config['epochs']}")
+        progress_bar = tqdm(balanced_train_loader, desc=f"Epoch {epoch}/{config['epochs']}")
         for data, labels in progress_bar:
             # 数据预处理
-            if 'TBM' in config['dataset_name'] or config['model_type'] == 'ResNet32_1d':
+            if 'TBM' in config['dataset_name']:
                 # 针对TBM数据或1D模型的处理
                 if len(data.shape) == 4:  # [batch_size, 1, 3, 1024]
                     data = data.squeeze(1)  # 移除额外的维度，变为[batch_size, 3, 1024]
@@ -118,7 +213,7 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
             })
         
         # 计算epoch平均损失和准确率
-        epoch_loss = running_loss / len(train_loader)
+        epoch_loss = running_loss / len(balanced_train_loader)
         epoch_acc = 100 * correct / total
         train_losses.append(epoch_loss)
         
@@ -166,48 +261,21 @@ def train_model(model, train_loader, val_loader, test_loader, config, dataset_ob
                 rho=config['rho'],
                 dataset_obj=dataset_obj,
                 run_number=config['run_number'],
-                model_type=config['model_type']
+                model_type=config['model_type'],
+                num_synthetic_samples=config['num_synthetic_samples']  # 传递合成样本数量
             )
-    
+
     # 加载最佳模型权重
     model.load_state_dict(best_model_wts)
     print(f"\n训练{'已提前结束' if early_stopped else '已完成'}, 使用验证集上最佳性能的模型")
     
     # 保存最佳模型
-    model_filename = f"{config['dataset_name']}_{config['model_type']}_rho{config['rho']}_run{config['run_number']}.pth"
+    model_filename = f"{config['dataset_name']}_{config['model_type']}_rho{config['rho']}_run{config['run_number']}_OREM.pth"
     model_path = os.path.join(config['save_dir'], model_filename)
     torch.save(model.state_dict(), model_path)
     print(f"最佳模型已保存到 {model_path}")
     
     return model
-
-def balance_dataset_with_orem(X, y, q=5):
-    # Separate minority and majority class samples
-    minority_class = 1  # Assuming positive class is the minority
-    majority_class = 0
-    
-    X_min = X[y == minority_class]
-    X_maj = X[y == majority_class]
-    
-    # If minority class is already the majority, switch labels
-    if len(X_min) > len(X_maj):
-        X_min, X_maj = X_maj, X_min
-        minority_class, majority_class = majority_class, minority_class
-    
-    # Generate synthetic samples
-    synthetic_samples = orem(X_min, X_maj, q=q)
-    
-    # Create synthetic labels (all minority class)
-    synthetic_labels = np.ones(len(synthetic_samples)) * minority_class
-    
-    # Combine original and synthetic data
-    X_balanced = np.vstack([X, synthetic_samples])
-    y_balanced = np.hstack([y, synthetic_labels])
-    
-    print(f"Original dataset shape: {X.shape}, {np.sum(y == minority_class)} minority samples, {np.sum(y == majority_class)} majority samples")
-    print(f"Balanced dataset shape: {X_balanced.shape}, {np.sum(y_balanced == minority_class)} minority samples, {np.sum(y_balanced == majority_class)} majority samples")
-    
-    return X_balanced, y_balanced
 
 def main():
     """主函数"""
@@ -240,8 +308,6 @@ def main():
     
     args = parser.parse_args()
     
-    # 设置随机种子
-    set_seed(args.seed)
     
     # 设置设备
     if args.gpu >= 0 and torch.cuda.is_available():
@@ -256,12 +322,12 @@ def main():
         'ResNet32_1d': {
             'learning_rate': 0.001,
         },
-        'BiLSTM': {
-            'learning_rate': 0.001,
-        },
-        'Transformer': {
-            'learning_rate': 0.0005,  # Transformer通常使用更小的学习率
-        }
+        # 'BiLSTM': {
+        #     'learning_rate': 0.001,
+        # },
+        # 'Transformer': {
+        #     'learning_rate': 0.0005,  # Transformer通常使用更小的学习率
+        # }
     }
     
     # 如果设置了运行SNR实验，则遍历所有SNR数据集
@@ -322,11 +388,15 @@ def main():
                 input_channels = 1
                 seq_length = 28  # MNIST的图像大小
             
-            # 每个模型在每个数据集上训练两次
-            for run_number in range(1, 3):
+            # 每个模型在每个数据集上训练十次
+            for run_number in range(1, 11):
                 print(f"\n{'='*50}")
                 print(f"开始训练 {model_type} 模型在 {dataset_name} 数据集上 (第 {run_number} 次运行)")
                 print(f"{'='*50}\n")
+
+                current_seed = args.seed + run_number
+                # 设置随机种子
+                set_seed(current_seed)
                 
                 # 创建配置字典
                 config = {
@@ -386,7 +456,8 @@ def main():
                     dataset_obj=dataset,
                     run_number=config['run_number'],
                     model_type=config['model_type'],
-                    is_final=True  # 标记这是最终评估
+                    is_final=True,  # 标记这是最终评估
+                    num_synthetic_samples=config.get('num_synthetic_samples', 0)  # 传递合成样本数量
                 )
                 
                 print("\n===== 最终评估结果 =====")
@@ -537,5 +608,5 @@ def get_recommended_epochs(dataset_name, model_type, rho):
 
 if __name__ == "__main__":
     main()
-# python main.py --dataset TBM_K_M --rho 0.01 --val_ratio 0.2 --patience 10 --save_dir /root/autodl-tmp/results
-# python /workspace/RL/baseline/main.py --run_snr_experiments --rho 0.01 --val_ratio 0.2 --patience 10 --save_dir /workspace/RL/baseline/results
+# python /workspace/RL/Comparison-OREM/main.py --dataset TBM_K_M --rho 0.01 --val_ratio 0.2 --patience 10 --save_dir /workspace/RL/Comparison-OREM/results
+# python /workspace/RL/Comparison-OREM/main.py --dataset TBM_K_M_Noise --rho 0.01 --val_ratio 0.2 --patience 10 --save_dir /workspace/RL/Comparison-OREM/results

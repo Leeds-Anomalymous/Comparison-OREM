@@ -98,7 +98,8 @@ def plot_confusion_matrix(y_true, y_pred, save_path=None, model_type=None, datas
     plt.close()
 
 def evaluate_model(model, test_loader, save_dir='./', dataset_name=None, rho=None, 
-                  dataset_obj=None, run_number=None, model_type=None, is_validation=False, is_final=False):
+                  dataset_obj=None, run_number=None, model_type=None, is_validation=False, 
+                  is_final=False, num_synthetic_samples=0):
     """
     评估模型性能并计算相关指标
     
@@ -113,6 +114,7 @@ def evaluate_model(model, test_loader, save_dir='./', dataset_name=None, rho=Non
         model_type: 模型类型名称
         is_validation: 是否是验证集评估
         is_final: 是否是最终评估(只有最终评估才保存混淆矩阵)
+        num_synthetic_samples: OREM生成的合成样本数量
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -213,6 +215,7 @@ def evaluate_model(model, test_loader, save_dir='./', dataset_name=None, rho=Non
         '数据集名称': [dataset_name if dataset_name else 'Unknown'],
         '模型类型': [model_type if model_type else 'Unknown'],
         '不平衡率rho': [rho if rho is not None else 'Unknown'],
+        'OREM生成样本数': [num_synthetic_samples],  # 添加OREM生成样本数量
         '训练集正类样本数': [train_positive_count],
         '训练集负类样本数': [train_negative_count],
         '验证集正类样本数': [val_positive_count],
